@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Models get auto-generated on first run
+models/
+
+# Raw/processed CSVs are large and reproducible from nse_collect.py
+raw/
+processed/
+plots/
+
+# Env
+.env
+.venv/
