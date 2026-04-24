@@ -1,12 +1,6 @@
 """
 NSE Stock Technical Analysis — Streamlit Dashboard
 ===================================================
-Run locally:
-    pip install streamlit pandas plotly scikit-learn joblib
-    streamlit run app.py
-
-Deploy:
-    Push to GitHub → connect at share.streamlit.io → done
 """
 
 import joblib

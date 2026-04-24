@@ -1,18 +1,17 @@
 """
 NSE Stock Data Collection + Feature Engineering
 ================================================
-Pulls 5 years of daily OHLCV for 15 NSE stocks + Nifty50 benchmark,
-computes all technical indicators, and saves clean CSVs.
+Pulls daily OHLCV data for 15 NSE-listed stocks across 5 sectors
+from Yahoo Finance (via yfinance), computes 25+ technical indicators
+from scratch, and saves clean CSVs ready for EDA and modelling.
 
 Outputs:
-    raw/          → one CSV per ticker (raw OHLCV)
-    processed/    → one CSV per ticker (OHLCV + all indicators)
-    combined.csv  → all tickers stacked into one file (for EDA)
-    users.csv     → one summary row per ticker
+    raw/           one CSV per ticker (raw OHLCV only)
+    processed/     one CSV per ticker (OHLCV + all indicators)
+    combined.csv   all 15 tickers stacked (main EDA input)
+    summary.csv    one summary row per ticker
 
-Usage:
-    pip install yfinance pandas numpy
-    python nse_collect.py
+Note: indicators are computed manually using pandas/numpy.
 """
 
 import os
@@ -22,8 +21,6 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-
 TICKERS = {
     "IT":      ["TCS.NS", "INFY.NS", "WIPRO.NS"],
     "Banking": ["HDFCBANK.NS", "AXISBANK.NS", "SBIN.NS"],
@@ -32,19 +29,15 @@ TICKERS = {
     "Energy":  ["NTPC.NS", "ONGC.NS", "POWERGRID.NS"],
 }
 
-BENCHMARK = "^NSEI"          # Nifty 50
-START     = "2020-01-01"
-END       = datetime.today().strftime("%Y-%m-%d")
+BENCHMARK = "^NSEI"   # Nifty 50 index — used as market benchmark
+START = "2020-01-01"  # start from Jan 2020 to include COVID crash
+END = datetime.today().strftime("%Y-%m-%d")  # pull up to today
 
 RAW_DIR  = "raw"
 PROC_DIR = "processed"
 
-# ── Directory setup ────────────────────────────────────────────────────────────
-
 os.makedirs(RAW_DIR, exist_ok=True)
 os.makedirs(PROC_DIR, exist_ok=True)
-
-# ── Indicator computation ──────────────────────────────────────────────────────
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -57,12 +50,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     low   = df["Low"]
     vol   = df["Volume"]
 
-    # ── Returns ───────────────────────────────────────────────────────────────
+    # ── Returns ───────────────────────────────────────────────────────────
+    # pct_change gives (today - yesterday) / yesterday
     df["daily_return"]    = close.pct_change()
     df["log_return"]      = np.log(close / close.shift(1))
     df["rolling_vol_20"]  = df["daily_return"].rolling(20).std()   # 20-day realised vol
 
-    # ── EMAs ──────────────────────────────────────────────────────────────────
+    # ── EMAs ──────────────────────────────────────────────────────────────
+    # ewm = exponential weighted mean, adjust=False uses recursive formula
     df["ema_20"]  = close.ewm(span=20,  adjust=False).mean()
     df["ema_50"]  = close.ewm(span=50,  adjust=False).mean()
     df["ema_200"] = close.ewm(span=200, adjust=False).mean()
@@ -71,7 +66,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_20_50_cross"]  = (df["ema_20"] > df["ema_50"]).astype(int)
     df["ema_50_200_cross"] = (df["ema_50"] > df["ema_200"]).astype(int)
 
-    # ── RSI (14) ──────────────────────────────────────────────────────────────
+    # ── RSI (14) ──────────────────────────────────────────────────────────
+    # Wilder smoothing = ewm with com=13 (equivalent to span=27, alpha=1/14)
     delta     = close.diff()
     gain      = delta.clip(lower=0)
     loss      = -delta.clip(upper=0)
@@ -84,7 +80,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["rsi_overbought"] = (df["rsi"] > 70).astype(int)
     df["rsi_oversold"]   = (df["rsi"] < 30).astype(int)
 
-    # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
+    # ── MACD (12, 26, 9) ──────────────────────────────────────────────────
     ema_12          = close.ewm(span=12, adjust=False).mean()
     ema_26          = close.ewm(span=26, adjust=False).mean()
     df["macd"]      = ema_12 - ema_26
@@ -101,7 +97,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         (df["macd"].shift(1) >= df["macd_signal"].shift(1))
     ).astype(int)
 
-    # ── Bollinger Bands (20, 2σ) ──────────────────────────────────────────────
+    # ── Bollinger Bands (20, 2σ) ──────────────────────────────────────────
+    # std over 20 days gives the band width; 2σ covers ~95% of price action
     sma_20             = close.rolling(20).mean()
     std_20             = close.rolling(20).std()
     df["bb_mid"]       = sma_20
@@ -114,7 +111,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_upper_touch"] = (close >= df["bb_upper"]).astype(int)
     df["bb_lower_touch"] = (close <= df["bb_lower"]).astype(int)
 
-    # ── ATR (14) ──────────────────────────────────────────────────────────────
+    # ── ATR (14) ──────────────────────────────────────────────────────────
+    # True Range accounts for overnight gaps (not just intraday high-low)
     prev_close     = close.shift(1)
     tr             = pd.concat([
         high - low,
@@ -124,19 +122,21 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["atr"]      = tr.ewm(com=13, adjust=False).mean()   # Wilder smoothing
     df["atr_pct"]  = df["atr"] / close                     # ATR as % of price (normalised)
 
-    # ── OBV ───────────────────────────────────────────────────────────────────
+    # ── OBV ───────────────────────────────────────────────────────────────
+    # Adds volume on up days, subtracts on down days — tracks money flow
     direction    = np.sign(close.diff()).fillna(0)
     df["obv"]    = (direction * vol).cumsum()
     df["obv_ema"] = df["obv"].ewm(span=20, adjust=False).mean()   # smoothed OBV trend
 
-    # ── Target variable (for model) ───────────────────────────────────────────
-    # 1 if tomorrow's close > today's close, else 0
+    # ── Target variable ───────────────────────────────────────────────────
+    # Binary classification target: 1 = price goes UP tomorrow, 0 = DOWN
+    # shift(-1) looks one day forward — last row will be NaN (no tomorrow)
     df["target"] = (close.shift(-1) > close).astype(int)
 
     return df
 
 
-# ── Data fetch ─────────────────────────────────────────────────────────────────
+# Data fetch
 
 def fetch_ticker(ticker: str, sector: str) -> pd.DataFrame | None:
     print(f"  Fetching {ticker}...")
@@ -152,7 +152,8 @@ def fetch_ticker(ticker: str, sector: str) -> pd.DataFrame | None:
 
         raw = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
 
-        # Forward-fill missing trading days (market holidays)
+        # asfreq("B") reindexes to business days, ffill fills market holidays
+        # with the previous trading day's closing price
         raw = raw.asfreq("B").ffill()   # business day frequency
 
         # Save raw CSV
@@ -166,7 +167,8 @@ def fetch_ticker(ticker: str, sector: str) -> pd.DataFrame | None:
         df["sector"] = sector
         df["name"]   = ticker.replace(".NS", "")
 
-        # Drop rows with NaN from indicator warmup period (first ~200 rows)
+        # EMA-200 needs 200 days of data before producing a valid value
+        # dropping these avoids NaN values going into model training
         df = df.dropna(subset=["ema_200", "rsi", "macd", "bb_mid", "atr"])
 
         # Save processed CSV
@@ -180,7 +182,7 @@ def fetch_ticker(ticker: str, sector: str) -> pd.DataFrame | None:
         return None
 
 
-# ── Summary row per ticker ─────────────────────────────────────────────────────
+# Summary row per ticker 
 
 def build_summary_row(df: pd.DataFrame, ticker: str, sector: str) -> dict:
     close = df["Close"]
@@ -205,9 +207,6 @@ def build_summary_row(df: pd.DataFrame, ticker: str, sector: str) -> dict:
         "macd_bearish_signals":df["macd_bearish"].sum(),
         "avg_volume":          int(df["Volume"].mean()),
     }
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     all_dfs    = []
@@ -240,12 +239,11 @@ def main():
     summary_df.to_csv("summary.csv", index=False)
 
     print(f"""
-── Done ──────────────────────────────────────────────────
+Done
   raw/              → {len(os.listdir(RAW_DIR))} files (raw OHLCV per ticker)
   processed/        → {len(os.listdir(PROC_DIR))} files (OHLCV + indicators)
   combined.csv      → {len(combined):,} rows  ({combined['ticker'].nunique()} tickers stacked)
   summary.csv       → {len(summary_df)} rows  (one per ticker)
-──────────────────────────────────────────────────────────
 
 Columns in processed CSVs:
   OHLCV:       Open, High, Low, Close, Volume
